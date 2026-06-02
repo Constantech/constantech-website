@@ -1,0 +1,8 @@
+{
+  "name": "node-domexception",
+  "version": "1.0.0",
+  "description": "A node implementation of the DOMException class",
+  "main": "index.js",
+  "author": "",
+  "license": "MIT"
+}
