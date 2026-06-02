@@ -2,11 +2,31 @@ import express from "express";
 import path from "path";
 import fs from "fs";
 import crypto from "crypto";
+import os from "os";
 import { createServer as createViteServer } from "vite";
 import { defaultSiteContent } from "./src/defaultData.js";
 
 const app = express();
 const PORT = 3000;
+
+// HTTP Security Headers Middleware
+app.use((req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "SAMEORIGIN");
+  res.setHeader("X-XSS-Protection", "1; mode=block");
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  next();
+});
+
+// Dynamic Request Logger Middleware
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on("finish", () => {
+    const elapsed = Date.now() - start;
+    console.log(`[${new Date().toISOString()}] ${req.method} ${req.originalUrl} - ${res.statusCode} (${elapsed}ms)`);
+  });
+  next();
+});
 
 // Increase payload limits for base64 media uploads
 app.use(express.json({ limit: "50mb" }));
@@ -15,12 +35,16 @@ app.use(express.urlencoded({ limit: "50mb", extended: true }));
 // Setup Directories
 const DATA_DIR = path.join(process.cwd(), "data");
 const UPLOADS_DIR = path.join(process.cwd(), "public", "uploads");
+const BACKUPS_DIR = path.join(DATA_DIR, "backups");
 
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 if (!fs.existsSync(UPLOADS_DIR)) {
   fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+}
+if (!fs.existsSync(BACKUPS_DIR)) {
+  fs.mkdirSync(BACKUPS_DIR, { recursive: true });
 }
 
 // Database JSON File Paths
@@ -193,10 +217,256 @@ app.put("/api/content", authRequired, (req, res) => {
       return res.status(400).json({ error: "Invalid content body" });
     }
 
+    // Auto backup current content
+    if (fs.existsSync(CONTENT_FILE)) {
+      try {
+        const currentData = fs.readFileSync(CONTENT_FILE, "utf8");
+        const backupName = `content-${Date.now()}.json`;
+        fs.writeFileSync(path.join(BACKUPS_DIR, backupName), currentData, "utf8");
+
+        // Retain only last 15 backups
+        const existingBackups = fs.readdirSync(BACKUPS_DIR)
+          .filter(f => f.startsWith("content-") && f.endsWith(".json"))
+          .map(f => {
+            const bPath = path.join(BACKUPS_DIR, f);
+            return { name: f, path: bPath, time: fs.statSync(bPath).mtimeMs };
+          })
+          .sort((a, b) => b.time - a.time);
+
+        if (existingBackups.length > 15) {
+          existingBackups.slice(15).forEach(b => {
+            try { fs.unlinkSync(b.path); } catch (e) {}
+          });
+        }
+      } catch (backupErr: any) {
+        console.error("Backup non-blocking warning:", backupErr.message);
+      }
+    }
+
     fs.writeFileSync(CONTENT_FILE, JSON.stringify(newContent, null, 2), "utf8");
     res.json({ success: true, message: "CMS Content updated successfully!" });
   } catch (e: any) {
     res.status(500).json({ error: "Failed to write content: " + e.message });
+  }
+});
+
+// ---------------- BACKUP & ROLLBACK ENDPOINTS -----------------
+
+// List backups
+app.get("/api/backups", authRequired, (req, res) => {
+  try {
+    if (!fs.existsSync(BACKUPS_DIR)) {
+      return res.json({ success: true, backups: [] });
+    }
+    const files = fs.readdirSync(BACKUPS_DIR);
+    const list = files
+      .filter(f => f.startsWith("content-") && f.endsWith(".json"))
+      .map(f => {
+        const bPath = path.join(BACKUPS_DIR, f);
+        const stat = fs.statSync(bPath);
+        return {
+          filename: f,
+          createdAt: stat.mtime.toISOString(),
+          size: `${(stat.size / 1024).toFixed(2)} KB`
+        };
+      })
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    res.json({ success: true, backups: list });
+  } catch (err: any) {
+    res.status(500).json({ error: "Failed to list content backups: " + err.message });
+  }
+});
+
+// Restore backup
+app.post("/api/backups/restore", authRequired, (req, res) => {
+  try {
+    const { filename } = req.body;
+    if (!filename || filename.includes("/") || filename.includes("..") || filename.includes("\\")) {
+      return res.status(400).json({ error: "Invalid backup filename payload" });
+    }
+    const targetPath = path.join(BACKUPS_DIR, filename);
+    if (!fs.existsSync(targetPath)) {
+      return res.status(404).json({ error: "Backup file not found in database backups repository" });
+    }
+    
+    // Save current as pre-restore fallback to avoid any user lockouts
+    if (fs.existsSync(CONTENT_FILE)) {
+      try {
+        const currentData = fs.readFileSync(CONTENT_FILE, "utf8");
+        const fallbackName = `content-pre-restore-${Date.now()}.json`;
+        fs.writeFileSync(path.join(BACKUPS_DIR, fallbackName), currentData, "utf8");
+      } catch (fallbackErr) {}
+    }
+
+    const backupData = fs.readFileSync(targetPath, "utf8");
+    // Validate JSON parsing
+    JSON.parse(backupData);
+    
+    fs.writeFileSync(CONTENT_FILE, backupData, "utf8");
+    res.json({ success: true, message: `System content restored to checkpoint: ${filename.replace(/^\d+-/, "")}` });
+  } catch (err: any) {
+    res.status(500).json({ error: "Rollback operation failed: " + err.message });
+  }
+});
+
+// Delete specific backup
+app.delete("/api/backups/:filename", authRequired, (req, res) => {
+  try {
+    const { filename } = req.params;
+    if (filename.includes("/") || filename.includes("..") || filename.includes("\\")) {
+      return res.status(400).json({ error: "Invalid filename" });
+    }
+    const targetPath = path.join(BACKUPS_DIR, filename);
+    if (!fs.existsSync(targetPath)) {
+      return res.status(404).json({ error: "Backup snapshot file not found" });
+    }
+    fs.unlinkSync(targetPath);
+    res.json({ success: true, message: "Backup snapshot successfully deleted" });
+  } catch (err: any) {
+    res.status(500).json({ error: "Failed to purge backup file: " + err.message });
+  }
+});
+
+// ---------------- SYSTEM HEALTH MONITOR ENDPOINT -----------------
+
+app.get("/api/system/status", authRequired, (req, res) => {
+  try {
+    const uptimeSec = Math.floor(process.uptime());
+    const days = Math.floor(uptimeSec / (3600 * 24));
+    const hrs = Math.floor((uptimeSec % (3600 * 24)) / 3600);
+    const mins = Math.floor((uptimeSec % 3600) / 60);
+    const secs = Math.floor(uptimeSec % 60);
+    const uptimeStr = `${days > 0 ? days + "d " : ""}${hrs > 0 ? hrs + "h " : ""}${mins}m ${secs}s`;
+
+    let dbSize = 0;
+    if (fs.existsSync(CONTENT_FILE)) {
+      dbSize += fs.statSync(CONTENT_FILE).size;
+    }
+    if (fs.existsSync(USERS_FILE)) {
+      dbSize += fs.statSync(USERS_FILE).size;
+    }
+
+    let uploadSize = 0;
+    let uploadCount = 0;
+    if (fs.existsSync(UPLOADS_DIR)) {
+      const files = fs.readdirSync(UPLOADS_DIR).filter(f => !f.startsWith("."));
+      uploadCount = files.length;
+      for (const f of files) {
+        try {
+          const fsStat = fs.statSync(path.join(UPLOADS_DIR, f));
+          uploadSize += fsStat.size;
+        } catch (e) {}
+      }
+    }
+
+    const freeMem = os.freemem();
+    const totalMem = os.totalmem();
+    const memUsagePercent = (((totalMem - freeMem) / totalMem) * 100).toFixed(1);
+
+    res.json({
+      success: true,
+      metrics: {
+        uptime: uptimeStr,
+        platform: process.platform,
+        arch: process.arch,
+        nodeVersion: process.version,
+        cpuCount: os.cpus().length,
+        cpuModel: os.cpus()[0]?.model || "Common Cloud Instance",
+        memoryTotal: `${(totalMem / 1024 / 1024 / 1024).toFixed(2)} GB`,
+        memoryFree: `${(freeMem / 1024 / 1024 / 1024).toFixed(2)} GB`,
+        memoryPercent: `${memUsagePercent}%`,
+        processMemory: `${(process.memoryUsage().rss / 1024 / 1024).toFixed(2)} MB`,
+        dbSizeBytes: dbSize,
+        dbSizeFormatted: `${(dbSize / 1024).toFixed(2)} KB`,
+        uploadSizeFormatted: `${(uploadSize / 1024 / 1024).toFixed(2)} MB`,
+        uploadCount
+      }
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: "Failed to gather sovereign system metrics: " + err.message });
+  }
+});
+
+// Direct safe system file download broker (for backups & audit capability)
+app.get("/api/system/download-file", authRequired, (req, res) => {
+  try {
+    const { file } = req.query;
+    if (!file || typeof file !== "string") {
+      return res.status(400).json({ error: "Missing file parameter query" });
+    }
+
+    let targetFilePath = "";
+    let downloadFilename = "";
+
+    if (file === "content.json") {
+      const pathsToTry = [
+        CONTENT_FILE,
+        path.join(process.cwd(), "data", "content.json"),
+        path.resolve(__dirname, "../data/content.json"),
+        path.resolve(__dirname, "../../data/content.json"),
+        "/data/content.json"
+      ];
+      for (const p of pathsToTry) {
+        if (fs.existsSync(p)) {
+          targetFilePath = p;
+          break;
+        }
+      }
+      if (!targetFilePath) targetFilePath = CONTENT_FILE;
+      downloadFilename = "content.json";
+    } else if (file === "users.json") {
+      const pathsToTry = [
+        USERS_FILE,
+        path.join(process.cwd(), "data", "users.json"),
+        path.resolve(__dirname, "../data/users.json"),
+        path.resolve(__dirname, "../../data/users.json"),
+        "/data/users.json"
+      ];
+      for (const p of pathsToTry) {
+        if (fs.existsSync(p)) {
+          targetFilePath = p;
+          break;
+        }
+      }
+      if (!targetFilePath) targetFilePath = USERS_FILE;
+      downloadFilename = "users.json";
+    } else if (file === "package-lock.json") {
+      const pathsToTry = [
+        path.join(process.cwd(), "package-lock.json"),
+        path.resolve(__dirname, "package-lock.json"),
+        path.resolve(__dirname, "../package-lock.json"),
+        path.resolve(__dirname, "../../package-lock.json"),
+        "/package-lock.json"
+      ];
+      for (const p of pathsToTry) {
+        if (fs.existsSync(p)) {
+          targetFilePath = p;
+          break;
+        }
+      }
+      if (!targetFilePath) {
+        targetFilePath = path.join(process.cwd(), "package-lock.json");
+      }
+      downloadFilename = "package-lock.json";
+    } else {
+      return res.status(400).json({ error: "Target file access is restricted or unsupported" });
+    }
+
+    if (!fs.existsSync(targetFilePath)) {
+      return res.status(404).json({ error: `File ${downloadFilename} is not present on host disk.` });
+    }
+
+    // Use built-in Express download broker which sets perfect attachment headers and stream flow
+    res.download(targetFilePath, downloadFilename, (err) => {
+      if (err) {
+        console.error("Downloader pipe failure:", err);
+        if (!res.headersSent) {
+          res.status(500).json({ error: "Attachment streaming failed: " + err.message });
+        }
+      }
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: "Failed to pipe document stream: " + err.message });
   }
 });
 

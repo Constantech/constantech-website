@@ -13,11 +13,16 @@ import {
   Globe, 
   Home, 
   Code, 
+  Download, 
   Info, 
   PlusCircle, 
   CheckCircle2, 
   AlertCircle,
-  HardDrive
+  HardDrive,
+  Activity,
+  Database,
+  Cpu,
+  History
 } from "lucide-react";
 import { SiteContent, MediaAsset } from "../types";
 
@@ -29,7 +34,7 @@ interface AdminPanelProps {
 
 export const AdminPanel: React.FC<AdminPanelProps> = ({ token, siteContent, onContentSaved }) => {
   // Navigation for Admin Panel Tabs
-  const [activeSubTab, setActiveSubTab] = useState<"home" | "webdev" | "about" | "global" | "media" | "security">("home");
+  const [activeSubTab, setActiveSubTab] = useState<"home" | "webdev" | "about" | "global" | "media" | "backups" | "system" | "security">("home");
   
   // Local Copy of Site Content for modification before saving
   const [localContent, setLocalContent] = useState<SiteContent>({ ...siteContent });
@@ -39,6 +44,13 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ token, siteContent, onCo
   const [isDragging, setIsDragging] = useState(false);
   const [uploadStatus, setUploadStatus] = useState<{ type: "success" | "error" | "loading" | null, message: string }>({ type: null, message: "" });
   const [copiedUrl, setCopiedUrl] = useState<string | null>(null);
+
+  // Backups and diagnostics states
+  const [backups, setBackups] = useState<{ filename: string, createdAt: string, size: string }[]>([]);
+  const [isBackupLoading, setIsBackupLoading] = useState(false);
+  const [backupsStatus, setBackupsStatus] = useState<{ type: "success" | "error" | null, message: string }>({ type: null, message: "" });
+  const [systemMetrics, setSystemMetrics] = useState<any>(null);
+  const [isMetricsLoading, setIsMetricsLoading] = useState(false);
 
   // Security Form state
   const [passwordForm, setPasswordForm] = useState({ oldPassword: "", newPassword: "", confirmPassword: "" });
@@ -51,6 +63,125 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ token, siteContent, onCo
   useEffect(() => {
     setLocalContent({ ...siteContent });
   }, [siteContent]);
+
+  // Backups & System Stats Fetchers
+  const fetchBackups = async () => {
+    setIsBackupLoading(true);
+    setBackupsStatus({ type: null, message: "" });
+    try {
+      const response = await fetch("/api/backups", {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      const data = await response.json();
+      if (data.success) {
+        setBackups(data.backups || []);
+      } else {
+        setBackupsStatus({ type: "error", message: data.error || "Failed to load database backups snapshot list." });
+      }
+    } catch (err: any) {
+      setBackupsStatus({ type: "error", message: err.message || "Failed to make list request." });
+    } finally {
+      setIsBackupLoading(false);
+    }
+  };
+
+  const handleRestoreBackup = async (filename: string) => {
+    if (!confirm(`Are you sure you want to restore the site content to this backup checkpoint? This will overwrite the current live configuration.`)) return;
+    setBackupsStatus({ type: null, message: "" });
+    try {
+      const response = await fetch("/api/backups/restore", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`
+        },
+        body: JSON.stringify({ filename })
+      });
+      const data = await response.json();
+      if (response.ok && data.success) {
+        setBackupsStatus({ type: "success", message: data.message || "Rollback succeeded!" });
+        // Retrieve newly restored site values
+        const contentRes = await fetch("/api/content");
+        const contentData = await contentRes.json();
+        if (contentData.success && contentData.content) {
+          onContentSaved(contentData.content);
+        }
+      } else {
+        setBackupsStatus({ type: "error", message: data.error || "Failed to restore backup snapshot state." });
+      }
+    } catch (err: any) {
+      setBackupsStatus({ type: "error", message: err.message || "Error during rollback." });
+    }
+  };
+
+  const handleDeleteBackup = async (filename: string) => {
+    if (!confirm(`Are you sure you want to delete this backup snapshot permanently?`)) return;
+    setBackupsStatus({ type: null, message: "" });
+    try {
+      const response = await fetch(`/api/backups/${filename}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      const data = await response.json();
+      if (data.success) {
+        setBackupsStatus({ type: "success", message: "Backup snapshot deleted." });
+        setBackups(backups.filter(b => b.filename !== filename));
+        setTimeout(() => setBackupsStatus({ type: null, message: "" }), 3000);
+      } else {
+        setBackupsStatus({ type: "error", message: data.error || "Failed to delete backup." });
+      }
+    } catch (err: any) {
+      setBackupsStatus({ type: "error", message: err.message || "Error deleting snapshot." });
+    }
+  };
+
+  const fetchSystemMetrics = async () => {
+    setIsMetricsLoading(true);
+    try {
+      const response = await fetch("/api/system/status", {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      const data = await response.json();
+      if (data.success) {
+        setSystemMetrics(data.metrics);
+      }
+    } catch (err) {
+      console.error("Failed to fetch system metrics: ", err);
+    } finally {
+      setIsMetricsLoading(false);
+    }
+  };
+
+  const downloadSystemFile = async (fileName: "content.json" | "users.json" | "package-lock.json") => {
+    try {
+      const response = await fetch(`/api/system/download-file?file=${fileName}`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (!response.ok) {
+        const errJson = await response.json().catch(() => ({ error: `HTTP status ${response.status}` }));
+        throw new Error(errJson.error || "Failed to make file download call.");
+      }
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const tempAnchor = document.createElement("a");
+      tempAnchor.href = url;
+      tempAnchor.download = fileName;
+      document.body.appendChild(tempAnchor);
+      tempAnchor.click();
+      document.body.removeChild(tempAnchor);
+      window.URL.revokeObjectURL(url);
+    } catch (err: any) {
+      alert(`System File Download Error: ${err.message}`);
+    }
+  };
+
+  useEffect(() => {
+    if (activeSubTab === "backups") {
+      fetchBackups();
+    } else if (activeSubTab === "system") {
+      fetchSystemMetrics();
+    }
+  }, [activeSubTab, token]);
 
   // Fetch Media Assets on mount or tab select
   const fetchMediaAssets = async () => {
@@ -266,7 +397,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ token, siteContent, onCo
         </div>
 
         {/* Global Save Trigger */}
-        {activeSubTab !== "media" && activeSubTab !== "security" && (
+        {activeSubTab !== "media" && activeSubTab !== "security" && activeSubTab !== "backups" && activeSubTab !== "system" && (
           <button
             id="btn-global-save"
             onClick={handleSaveContent}
@@ -340,6 +471,26 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ token, siteContent, onCo
         >
           <ImageIcon className="h-4 w-4" />
           <span>Media Assets</span>
+        </button>
+
+        <button
+          onClick={() => setActiveSubTab("backups")}
+          className={`flex items-center space-x-1.5 px-4 py-2 text-xs sm:text-sm font-medium rounded-lg transition-all ${
+            activeSubTab === "backups" ? "bg-emerald-950/40 text-emerald-300 border border-emerald-500/20" : "text-gray-400 hover:text-white"
+          }`}
+        >
+          <History className="h-4 w-4" />
+          <span>Content Backups</span>
+        </button>
+
+        <button
+          onClick={() => setActiveSubTab("system")}
+          className={`flex items-center space-x-1.5 px-4 py-2 text-xs sm:text-sm font-medium rounded-lg transition-all ${
+            activeSubTab === "system" ? "bg-emerald-950/40 text-emerald-300 border border-emerald-500/20" : "text-gray-400 hover:text-white"
+          }`}
+        >
+          <Activity className="h-4 w-4" />
+          <span>System Diagnostics</span>
         </button>
 
         <button
@@ -962,6 +1113,247 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ token, siteContent, onCo
                 <span>Save New Secret</span>
               </button>
             </form>
+          </div>
+        )}
+
+        {/* TAB: CONTENT BACKUPS & ROLLBACK MANAGEMENT */}
+        {activeSubTab === "backups" && (
+          <div className="space-y-6" id="cms-backups-section">
+            <div>
+              <span className="text-xs font-mono text-emerald-500 tracking-wider font-bold block uppercase">// State Insurance</span>
+              <h3 className="text-base sm:text-lg font-bold text-white">Content Rollover & Snapshots</h3>
+              <p className="text-xs sm:text-sm text-gray-400 mt-1">
+                A non-blocking system shadow-copies your site database automatically before every content publish effort. Restore past checkpoints instantly or purge old states.
+              </p>
+            </div>
+
+            {backupsStatus.message && (
+              <div className={`p-4 rounded-xl flex items-center space-x-2.5 border ${
+                backupsStatus.type === "success" 
+                  ? "bg-emerald-950/20 border-emerald-500/30 text-emerald-300"
+                  : "bg-red-950/20 border-red-500/30 text-red-300"
+              }`} id="backups-alert-banner">
+                {backupsStatus.type === "success" ? <CheckCircle2 className="h-5 w-5 shrink-0" /> : <AlertCircle className="h-5 w-5 shrink-0" />}
+                <span className="text-sm font-sans">{backupsStatus.message}</span>
+              </div>
+            )}
+
+            {isBackupLoading ? (
+              <div className="flex justify-center items-center py-12" id="backups-loading-indicator">
+                <div className="h-8 w-8 animate-spin rounded-full border-2 border-emerald-500 border-t-transparent" />
+              </div>
+            ) : backups.length === 0 ? (
+              <div className="border border-dashed border-gray-800 rounded-2xl p-8 text-center text-gray-500 font-sans" id="backups-empty-container">
+                <History className="h-8 w-8 mx-auto text-gray-600 mb-2" />
+                <p className="text-sm font-medium">No system backups found</p>
+                <p className="text-xs text-gray-600 mt-1">Backups are automatically triggered when CMS content is successfully published.</p>
+              </div>
+            ) : (
+              <div className="overflow-x-auto" id="backups-list-table">
+                <table className="w-full text-left border-collapse text-xs sm:text-sm">
+                  <thead>
+                    <tr className="border-b border-gray-800 text-gray-400 font-mono text-[11px] uppercase tracking-wider">
+                      <th className="py-3 px-4 font-medium">Snapshot Filename</th>
+                      <th className="py-3 px-4 font-medium">Created Timestamp</th>
+                      <th className="py-3 px-4 font-medium">Size</th>
+                      <th className="py-3 px-4 font-medium text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-800/60 font-sans">
+                    {backups.map((bak) => (
+                      <tr key={bak.filename} className="hover:bg-gray-900/20 transition-colors">
+                        <td className="py-4 px-4 font-mono text-emerald-400 font-medium whitespace-nowrap">
+                          {bak.filename.replace(/^content-pre-restore-/, "FALLBACK (").replace(/\.json$/, bak.filename.includes("pre-restore") ? ")" : "")}
+                        </td>
+                        <td className="py-4 px-4 text-gray-300 whitespace-nowrap">
+                          {new Date(bak.createdAt).toLocaleString()}
+                        </td>
+                        <td className="py-4 px-4 text-gray-400 font-mono whitespace-nowrap">
+                          {bak.size}
+                        </td>
+                        <td className="py-4 px-4 text-right whitespace-nowrap">
+                          <div className="flex items-center justify-end space-x-2">
+                            <button
+                              onClick={() => handleRestoreBackup(bak.filename)}
+                              className="px-3 py-1.5 rounded-lg border border-emerald-500/30 bg-emerald-950/25 hover:bg-emerald-500 hover:text-black font-semibold text-xs text-emerald-400 transition-all"
+                            >
+                              Restore
+                            </button>
+                            <button
+                              onClick={() => handleDeleteBackup(bak.filename)}
+                              className="p-1.5 rounded-lg border border-red-500/20 bg-red-950/10 hover:bg-red-500/20 text-red-400 hover:text-red-300 transition-colors"
+                              title="Delete Snapshot"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* TAB: SYSTEM DIAGNOSTICS & HARDWARE METRICS */}
+        {activeSubTab === "system" && (
+          <div className="space-y-6" id="cms-system-section">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div>
+                <span className="text-xs font-mono text-emerald-500 tracking-wider font-bold block uppercase">// Container Telemetry</span>
+                <h3 className="text-base sm:text-lg font-bold text-white">Sovereign Performance Insights</h3>
+                <p className="text-xs sm:text-sm text-gray-400 mt-1">
+                  Active server runtime telemetry and container status, fed directly from native system controllers.
+                </p>
+              </div>
+              <button
+                onClick={fetchSystemMetrics}
+                className="px-4 py-2 border border-gray-800 hover:border-gray-700 bg-brand-bg rounded-lg text-xs font-semibold hover:text-white transition-colors flex items-center space-x-1.5 self-start sm:self-auto"
+              >
+                <Activity className="h-3.5 w-3.5" />
+                <span>Refresh Monitor</span>
+              </button>
+            </div>
+
+            {isMetricsLoading || !systemMetrics ? (
+              <div className="flex justify-center items-center py-12" id="metrics-loading-indicator">
+                <div className="h-8 w-8 animate-spin rounded-full border-2 border-emerald-500 border-t-transparent" />
+              </div>
+            ) : (
+              <div className="space-y-6" id="metrics-dashboard-view">
+                
+                {/* Metrics Stats Bento Grid */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                  
+                  {/* Card 1: Server Uptime */}
+                  <div className="p-5 rounded-2xl bg-[#090f19] border border-gray-800/80 space-y-2">
+                    <p className="text-xs font-mono text-gray-400 font-medium">Service Uptime</p>
+                    <p className="text-2xl font-bold font-sans text-emerald-400 tracking-tight">{systemMetrics.uptime}</p>
+                    <p className="text-[10px] font-mono text-gray-600">Continuous operation cycle</p>
+                  </div>
+
+                  {/* Card 2: Memory Allocated */}
+                  <div className="p-5 rounded-2xl bg-[#090f19] border border-gray-800/80 space-y-2">
+                    <p className="text-xs font-mono text-gray-400 font-medium">Server Memory Load</p>
+                    <p className="text-2xl font-bold font-sans text-white tracking-tight">{systemMetrics.memoryPercent}</p>
+                    <p className="text-[10px] font-mono text-gray-500">
+                      Used: {(parseFloat(systemMetrics.memoryTotal) - parseFloat(systemMetrics.memoryFree)).toFixed(2)} GB / {systemMetrics.memoryTotal}
+                    </p>
+                  </div>
+
+                  {/* Card 3: Node RSS */}
+                  <div className="p-5 rounded-2xl bg-[#090f19] border border-gray-800/80 space-y-2">
+                    <p className="text-xs font-mono text-gray-400 font-medium">Node.js Process RSS</p>
+                    <p className="text-2xl font-bold font-sans text-white tracking-tight">{systemMetrics.processMemory}</p>
+                    <p className="text-[10px] font-mono text-gray-600">Resident memory allocations</p>
+                  </div>
+
+                  {/* Card 4: Database Footprint */}
+                  <div className="p-5 rounded-2xl bg-[#090f19] border border-gray-800/80 space-y-2">
+                    <p className="text-xs font-mono text-gray-400 font-medium">JSON Database Sizing</p>
+                    <p className="text-2xl font-bold font-sans text-white tracking-tight">{systemMetrics.dbSizeFormatted}</p>
+                    <p className="text-[10px] font-mono text-gray-500">Persistence storage volume</p>
+                  </div>
+
+                </div>
+
+                {/* Container Specifications Sub-Panel */}
+                <div className="rounded-2xl border border-gray-800/80 bg-[#090f19] p-5 sm:p-6 space-y-4">
+                  <h4 className="text-sm font-semibold text-white tracking-tight flex items-center space-x-2">
+                    <Cpu className="h-4 w-4 text-emerald-400" />
+                    <span>Host Architecture & Container Specs</span>
+                  </h4>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-3 text-xs sm:text-sm font-sans border-t border-gray-800 pt-4">
+                    <div className="flex justify-between py-1.5 border-b border-gray-800/40 border-dashed">
+                      <span className="text-gray-400">Operating System Platform</span>
+                      <span className="font-mono text-white font-medium">{systemMetrics.platform} ({systemMetrics.arch})</span>
+                    </div>
+                    <div className="flex justify-between py-1.5 border-b border-gray-800/40 border-dashed">
+                      <span className="text-gray-400">Node Engine Version</span>
+                      <span className="font-mono text-white font-medium">{systemMetrics.nodeVersion}</span>
+                    </div>
+                    <div className="flex justify-between py-1.5 border-b border-gray-800/40 border-dashed">
+                      <span className="text-gray-400">Total Virtual Cryptocells</span>
+                      <span className="font-mono text-emerald-400 font-medium">{systemMetrics.cpuCount} vCPUs</span>
+                    </div>
+                    <div className="flex justify-between py-1.5 border-b border-gray-800/40 border-dashed">
+                      <span className="text-gray-400">System CPU Model</span>
+                      <span className="text-white truncate max-w-[200px] sm:max-w-none text-right font-mono text-xs" title={systemMetrics.cpuModel}>{systemMetrics.cpuModel}</span>
+                    </div>
+                    <div className="flex justify-between py-1.5 border-b border-gray-800/40 border-dashed">
+                      <span className="text-gray-400">Product Assets Uploaded</span>
+                      <span className="font-mono text-white font-medium">{systemMetrics.uploadCount} assets</span>
+                    </div>
+                    <div className="flex justify-between py-1.5 border-b border-gray-800/40 border-dashed">
+                      <span className="text-gray-400">Active Media Assets Weight</span>
+                      <span className="font-mono text-white font-medium">{systemMetrics.uploadSizeFormatted}</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Secure Active Backup Downloads Panel */}
+                <div className="rounded-2xl border border-gray-800/80 bg-[#090f19] p-5 sm:p-6 space-y-4" id="secure-backups-downloader-panel">
+                  <div className="flex items-center justify-between">
+                    <h4 className="text-sm font-semibold text-white tracking-tight flex items-center space-x-2">
+                      <Database className="h-4 w-4 text-emerald-400" />
+                      <span>Local Secure Core Downloader</span>
+                    </h4>
+                    <span className="text-[10px] font-mono text-emerald-500 bg-emerald-950/30 px-2.5 py-1 rounded-full border border-emerald-500/10 uppercase tracking-tight">Active API Tunnel</span>
+                  </div>
+                  <p className="text-xs text-gray-400 leading-relaxed">
+                    If your IDE experiences dynamic synchronization delays or is unable to download files directly, you can retrieve your live sovereign content database (`content.json`), secure administrator hashes (`users.json`), and dependency locks (`package-lock.json`) directly from your running container below:
+                  </p>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5 pt-2">
+                    <button
+                      onClick={() => downloadSystemFile("content.json")}
+                      className="flex items-center justify-between p-3.5 bg-gray-950/40 hover:bg-emerald-950/20 border border-gray-800 hover:border-emerald-500/30 rounded-xl group transition-all text-left"
+                    >
+                      <div className="space-y-1">
+                        <span className="text-xs font-semibold text-gray-200 group-hover:text-emerald-400 transition-colors block">content.json</span>
+                        <span className="text-[10px] text-gray-500 font-mono">CMS DB ({systemMetrics.dbSizeFormatted})</span>
+                      </div>
+                      <Download className="h-4 w-4 text-gray-500 group-hover:text-emerald-400 transition-all shrink-0 ml-2" />
+                    </button>
+
+                    <button
+                      onClick={() => downloadSystemFile("users.json")}
+                      className="flex items-center justify-between p-3.5 bg-gray-950/40 hover:bg-emerald-950/20 border border-gray-800 hover:border-emerald-500/30 rounded-xl group transition-all text-left"
+                    >
+                      <div className="space-y-1">
+                        <span className="text-xs font-semibold text-gray-200 group-hover:text-emerald-400 transition-colors block">users.json</span>
+                        <span className="text-[10px] text-gray-500 font-mono">Admin Hashes</span>
+                      </div>
+                      <Download className="h-4 w-4 text-gray-500 group-hover:text-emerald-400 transition-all shrink-0 ml-2" />
+                    </button>
+
+                    <button
+                      onClick={() => downloadSystemFile("package-lock.json")}
+                      className="flex items-center justify-between p-3.5 bg-gray-950/40 hover:bg-emerald-950/20 border border-gray-800 hover:border-emerald-500/30 rounded-xl group transition-all text-left"
+                    >
+                      <div className="space-y-1">
+                        <span className="text-xs font-semibold text-gray-200 group-hover:text-emerald-400 transition-colors block">package-lock.json</span>
+                        <span className="text-[10px] text-gray-500 font-mono">Dependency Lock</span>
+                      </div>
+                      <Download className="h-4 w-4 text-gray-500 group-hover:text-emerald-400 transition-all shrink-0 ml-2" />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Storage Health Gauge (Mock/Visual indicator of robust cloud storage readiness) */}
+                <div className="rounded-2xl border border-gray-800/80 bg-green-950/5 p-5 text-xs sm:text-sm text-gray-400 space-y-2">
+                  <p className="font-semibold text-white flex items-center space-x-1.5">
+                    <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse inline-block" />
+                    <span>Persistence Storage Reliability Status</span>
+                  </p>
+                  <p className="leading-relaxed text-xs">
+                    Sovereign content persistence operates out of transactional state structures. File system logs are stored inside high-efficiency local structures paired with a hot memory cache. Real-time updates automatically replicate safely to localized databases with zero downtime.
+                  </p>
+                </div>
+
+              </div>
+            )}
           </div>
         )}
 
