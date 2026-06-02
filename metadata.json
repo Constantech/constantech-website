@@ -1,0 +1,6 @@
+{
+  "name": "Constantech Portal",
+  "description": "Modern corporate portal for Constantech with a comprehensive CMS editor for content updates, media uploads, and integrated secure admin authentication.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
