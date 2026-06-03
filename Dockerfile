@@ -39,5 +39,8 @@ RUN mkdir -p /app/data /app/public/uploads
 # Express binds to 3000 usually unless process.env.PORT is respected
 EXPOSE 3000
 
+# Set NODE_ENV to production to avoid Vite dev server mode
+ENV NODE_ENV=production
+
 # Start the application
 CMD ["npm", "start"]
