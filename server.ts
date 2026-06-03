@@ -7,7 +7,7 @@ import { createServer as createViteServer } from "vite";
 import { defaultSiteContent } from "./src/defaultData.js";
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 
 // HTTP Security Headers Middleware
 app.use((req, res, next) => {
