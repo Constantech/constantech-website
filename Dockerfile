@@ -1,30 +1,43 @@
-# Stage 1: Build the React frontend and bundle the Express server
+# Use an official Node.js runtime as a parent image
 FROM node:22-alpine AS builder
+
+# Set the working directory to /app
 WORKDIR /app
 
-# Install dependencies
+# Copy package.json and package-lock.json
 COPY package*.json ./
+
+# Install all dependencies (including devDependencies needed for build)
 RUN npm ci
 
-# Copy source files and build
+# Copy the rest of your application's code
 COPY . .
+
+# Build the application
 RUN npm run build
 
-# Stage 2: Run-time production environment
-FROM node:22-alpine AS runner
+# Stage 2: Serve the app
+FROM node:22-alpine
+
 WORKDIR /app
-ENV NODE_ENV=production
+
+# Copy package.json and package-lock.json
+COPY package*.json ./
 
 # Install only production dependencies
-COPY package*.json ./
-RUN npm ci --only=production
+RUN npm ci --omit=dev
 
-# Copy built assets and server from builder stage
+# Copy the built output from the builder stage
 COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/data ./data
+# Copy the public / default content folders if needed (if your app copies them automatically or needs them mounted)
+COPY --from=builder /app/src ./src
 
-# Expose server port 
+# Create needed directories for runtime
+RUN mkdir -p /app/data /app/public/uploads
+
+# Expose port (Cloud Run defaults to 8080, but this app listens on 3000)
+# Express binds to 3000 usually unless process.env.PORT is respected
 EXPOSE 3000
 
-# Run compiled CommonJS server bundle
-CMD ["node", "dist/server.cjs"]
+# Start the application
+CMD ["npm", "start"]
